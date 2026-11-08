@@ -63,6 +63,8 @@ button{font-family:inherit;border:0;cursor:pointer;color:#fff;touch-action:manip
 .pu .bar b{display:block;height:100%;background:var(--yellow);border-radius:6px}
 #invBadge{position:absolute;left:50%;transform:translateX(-50%);top:calc(var(--safe-t) + 16px);padding:4px 12px;border-radius:12px;
   background:linear-gradient(90deg,#8a2be2,#2f7bff);border:2px solid #fff;font-size:15px;display:none}
+#warn{position:absolute;left:50%;top:calc(var(--safe-t) + 58px);transform:translateX(-50%);padding:6px 16px;border-radius:14px;background:#e8323c;border:3px solid #fff;font-size:22px;display:none;animation:pulse .35s infinite alternate}
+#warn.show{display:block}
 #toast{position:absolute;left:50%;top:32%;transform:translate(-50%,-50%);font-size:40px;opacity:0;transition:opacity .2s;white-space:nowrap}
 #toast.show{opacity:1}
 

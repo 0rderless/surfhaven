@@ -1,8 +1,7 @@
 import * as THREE from './lib/three.module.min.js';
-import { GLTFLoader } from './lib/GLTFLoader.js';
 import { RoundedBoxGeometry } from './lib/RoundedBoxGeometry.js';
 import { RoomEnvironment } from './lib/RoomEnvironment.js';
-import { clone as cloneSkinned } from './lib/SkeletonUtils.js';
+import { CHARACTERS, buildCharacter, playAction, updateCharacter, tickCharacters } from './characters.js';
 
 /* =====================================================================
    SurfHaven - endless rail runner
@@ -48,17 +47,7 @@ const POWER_INFO = {
 const powerDuration = k => 10 + save.lv[k] * 2.5;
 
 // ---------------------------------------------------------------- characters
-// Rigged + animated people (Quaternius "Ultimate Animated Character Pack", CC0),
-// recoloured per character, with extra accessories attached to their bones.
-const CHARACTERS = [
-  { id: 'haven',    name: 'Haven',       model: 'casual_male',   colors: { Skin: '#c68a5c', Shirt: '#f2f2f2', Pants: '#1d2a4a', Belt: '#d62828', Hair: '#2b1b12' }, acc: ['cap'], cap: '#d62828' },
-  { id: 'school',   name: 'School Boy',  model: 'casual_male',   colors: { Skin: '#f3c9a3', Shirt: '#1f3a7a', Pants: '#5d6470', Belt: '#1c1c1c', Hair: '#6b3f1f' }, acc: ['backpack'], pack: '#f4b400' },
-  { id: 'tattoo',   name: 'Tattoo Girl', model: 'casual_female', colors: { Skin: '#e3a77d', Shirt: '#161616', Pants: '#3b6fb6', Belt: '#d4af37', Hair: '#ff4fa3' }, acc: ['tattoos'] },
-  { id: 'blackboy', name: 'Black Boy',   model: 'casual_male',   colors: { Skin: '#4a2e1f', Shirt: '#ff7a1a', Pants: '#262626', Belt: '#ffffff', Hair: '#111111' }, acc: ['chain'] },
-  { id: 'void',     name: 'Void',        model: 'suit_male',     colors: { Skin: '#1a0f2e', Main: '#140a26', Black: '#07040e', Grey: '#2a1450', Helmet: '#0d0716', Face: '#e0a0ff' }, glow: { Grey: '#8a2be2', Face: '#c060ff' }, trail: '#b04dff' },
-  { id: 'blaze',    name: 'Blaze',       model: 'suit_female',   colors: { Skin: '#e0a77d', Main: '#c8102e', Black: '#4a0010', Grey: '#ffb300', Hair: '#ff6a00' }, acc: ['cape'], cape: '#ff6a00', trail: '#ff8a1a' },
-  { id: 'volt',     name: 'Volt',        model: 'suit_male',     colors: { Skin: '#c68a5c', Main: '#1565ff', Black: '#0b2a7a', Grey: '#ffe600', Helmet: '#ffe600' }, acc: ['cape'], cape: '#0b2a7a', trail: '#5ce1ff' },
-];
+// Built in code on a realistic rig - see characters.js
 const charById = id => CHARACTERS.find(c => c.id === id) || CHARACTERS[0];
 
 // ---------------------------------------------------------------- renderer / scene
@@ -298,10 +287,11 @@ function makeCar(ci, lit) {
   const body = new THREE.Mesh(CAR_BODY_GEO, lit ? set.matsLit : set.mats);
   body.position.y = 0.42 + 2.85 / 2; g.add(body);
   const dark = lam('#26272c'), metal = lam('#b9c0cb');
+  const wheels = []; g.userData.wheels = wheels;
   box(1.95, 0.3, CAR_LEN - 1.0, dark, 0, 0.32, 0, g);
   for (const wz of [-CAR_LEN / 2 + 1.7, CAR_LEN / 2 - 1.7]) {
     box(1.9, 0.3, 1.9, dark, 0, 0.36, wz, g);
-    for (const wx of [-0.86, 0.86]) for (const dz of [-0.55, 0.55]) { const w = new THREE.Mesh(WHEEL_GEO, metal); w.position.set(wx, 0.33, wz + dz); g.add(w); }
+    for (const wx of [-0.86, 0.86]) for (const dz of [-0.55, 0.55]) { const w = new THREE.Mesh(WHEEL_GEO, metal); w.position.set(wx, 0.33, wz + dz); g.add(w); wheels.push(w); }
   }
   for (const rz of [-1.6, 2.2]) { const ru = new THREE.Mesh(ROOF_UNIT_GEO, metal); ru.position.set(0, 3.36, rz); g.add(ru); }
   box(0.7, 0.14, 0.25, dark, 0, 0.62, CAR_LEN / 2 + 0.08, g);
@@ -533,136 +523,7 @@ const PICKUP_FACTORY = { jet: () => makeJetpackModel(1.15), boots: makeBootsMode
 const PICKUP_GLOW = { jet: 0xff9a40, boots: 0x6aff8a, magnet: 0xff6060, mult: 0xffc040, key: 0xc080ff };
 
 // ---------------------------------------------------------------- character builder
-const gltfLoader = new GLTFLoader();
-const modelCache = {};
-const loadModel = name => modelCache[name] || (modelCache[name] = gltfLoader.loadAsync('models/' + name + '.glb'));
-const MODEL_SCALE = 0.6;     // model units -> world units (characters ~1.9 tall)
-const ANIM_BODY_Y = 0.868;   // hip height of the rig the shared animations come from
-const ONCE = ['Jump', 'Roll', 'Death', 'RecieveHit', 'Fly'];
-const X_AXIS = new THREE.Vector3(1, 0, 0);
-const _q = new THREE.Quaternion();
-
-function stdMat(color, extra) { return new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0, ...extra }); }
-
-async function buildCharacter(def) {
-  const [gltf, animSrc] = await Promise.all([loadModel(def.model), loadModel('casual_female')]);
-  const model = cloneSkinned(gltf.scene);
-  const root = new THREE.Group();
-  const tilt = new THREE.Group(); root.add(tilt);
-  const holder = new THREE.Group(); holder.rotation.y = Math.PI; holder.scale.setScalar(MODEL_SCALE);
-  tilt.add(holder); holder.add(model);
-
-  model.traverse(o => {
-    if (!o.isMesh) return;
-    o.castShadow = true; o.frustumCulled = false;
-    const recolor = m => {
-      const c = m.clone();
-      if (def.colors[m.name]) c.color.set(def.colors[m.name]);
-      if (def.glow && def.glow[m.name]) { c.emissive = new THREE.Color(def.glow[m.name]); c.emissiveIntensity = 1.6; }
-      c.roughness = 0.7; c.metalness = 0; c.envMapIntensity = 0.6;
-      return c;
-    };
-    o.material = Array.isArray(o.material) ? o.material.map(recolor) : recolor(o.material);
-  });
-
-  // shared animation set; rescale hip/foot translations to this body's proportions
-  const mixer = new THREE.AnimationMixer(model);
-  const body = model.getObjectByName('Body');
-  const ratio = body ? body.position.y / ANIM_BODY_Y : 1;
-  const clips = animSrc.animations.slice();
-  const jumpClip = clips.find(c => c.name === 'Jump');
-  if (jumpClip) { const fly = jumpClip.clone(); fly.name = 'Fly'; clips.push(fly); }
-  const actions = {};
-  for (const src of clips) {
-    const clip = src.clone();
-    clip.tracks = clip.tracks.filter(t => !t.name.endsWith('.scale'));
-    if (Math.abs(ratio - 1) > 0.01) for (const t of clip.tracks) {
-      if (/^(Body|FootL|FootR|PoleTargetL|PoleTargetR)\.position$/.test(t.name)) for (let i = 0; i < t.values.length; i++) t.values[i] *= ratio;
-    }
-    const a = mixer.clipAction(clip);
-    if (ONCE.includes(clip.name)) { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; }
-    actions[clip.name] = a;
-  }
-
-  // accessories: placed in root space at the rest pose, then parented to a bone
-  root.updateMatrixWorld(true);
-  const bone = n => model.getObjectByName(n);
-  const wp = (n, x = 0, y = 0, z = 0) => bone(n).getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(x, y, z));
-  const attach = (boneName, obj, pos) => { obj.position.copy(pos); bone(boneName).attach(obj); obj.traverse(o => { if (o.isMesh) o.castShadow = true; }); return obj; };
-  const has = k => (def.acc || []).includes(k);
-  const headTop = wp('Head', 0, 0.5, 0.02);
-
-  if (has('cap')) {
-    const m = stdMat(def.cap);
-    const cap = new THREE.Group();
-    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.3, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), m);
-    dome.scale.set(1.0, 0.6, 1.06);
-    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.03, 20, 1, false, -Math.PI / 2, Math.PI), m);
-    brim.position.set(0, 0.01, 0.2); brim.scale.set(1, 1, 1.15);
-    const knob = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 6), stdMat('#ffffff')); knob.position.y = 0.21;
-    cap.add(dome, brim, knob);
-    attach('Head', cap, headTop);
-  }
-  if (has('backpack')) {
-    const bp = new THREE.Group();
-    bp.add(new THREE.Mesh(new RoundedBoxGeometry(0.46, 0.52, 0.22, 2, 0.07), stdMat(def.pack)));
-    const pocket = new THREE.Mesh(new RoundedBoxGeometry(0.32, 0.2, 0.08, 2, 0.035), stdMat('#d49a00')); pocket.position.set(0, -0.12, 0.13); bp.add(pocket);
-    for (const x of [-0.15, 0.15]) { const st = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.5, 0.04), stdMat('#3a3a3a')); st.position.set(x, 0.05, -0.12); bp.add(st); }
-    attach('Torso', bp, wp('Torso', 0, 0.05, 0.27));
-  }
-  if (has('chain')) {
-    const gold = stdMat('#ffd23a', { metalness: 0.9, roughness: 0.25 });
-    const ch = new THREE.Group();
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.018, 6, 28), gold); ring.rotation.x = Math.PI / 2 - 0.55; ch.add(ring);
-    const med = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.025, 14), gold); med.rotation.x = Math.PI / 2; med.position.set(0, -0.13, -0.15); ch.add(med);
-    attach('Neck', ch, wp('Neck', 0, -0.06, -0.01));
-  }
-  if (has('tattoos')) {
-    const ink = stdMat('#1d1530');
-    for (const side of ['L', 'R']) for (const [a, b, ts] of [['UpperArm', 'LowerArm', [0.35, 0.6]], ['LowerArm', 'Fist', [0.45]]]) {
-      const pa = wp(a + side), pb = wp(b + side);
-      const dir = pb.clone().sub(pa).normalize();
-      for (const t of ts) {
-        const r = new THREE.Mesh(new THREE.TorusGeometry(0.068, 0.013, 6, 18), ink);
-        r.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
-        r.position.copy(pa.clone().lerp(pb, t));
-        bone(a + side).attach(r);
-      }
-    }
-  }
-  let cape = null;
-  if (has('cape')) {
-    const geo = new THREE.PlaneGeometry(0.66, 1.05, 4, 8); geo.translate(0, -0.525, 0);
-    const p = geo.attributes.position;
-    for (let i = 0; i < p.count; i++) p.setZ(i, Math.pow(p.getX(i) / 0.33, 2) * 0.06);
-    geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo, stdMat(def.cape, { side: THREE.DoubleSide }));
-    const pivot = new THREE.Group(); pivot.add(mesh);
-    attach('Torso', pivot, wp('Torso', 0, 0.32, 0.17));
-    cape = { pivot, rest: pivot.quaternion.clone() };
-  }
-  const jet = makeJetpackModel(0.85);
-  jet.visible = false;
-  attach('Torso', jet, wp('Torso', 0, 0.02, 0.3));
-
-  const h = { root, tilt, holder, model, mixer, actions, cur: null, cape, jet, def };
-  playAnim(h, 'Idle', 0);
-  return h;
-}
-
-function playAnim(h, name, fade = 0.15) {
-  const a = h.actions[name];
-  if (!a || h.cur === name) return a;
-  const prev = h.actions[h.cur];
-  a.reset(); a.setEffectiveTimeScale(1); a.setEffectiveWeight(1); a.play();
-  if (prev) { if (fade > 0) prev.crossFadeTo(a, fade, false); else prev.stop(); }
-  h.cur = name;
-  return a;
-}
-function restartAnim(h, name, fade) {
-  if (h.cur !== name) return playAnim(h, name, fade);
-  const a = h.actions[name]; a.reset(); a.play(); return a;
-}
+// (lives in characters.js)
 
 // ---------------------------------------------------------------- drone chaser
 function makeDrone() {
@@ -752,6 +613,8 @@ const Sound = {
   key() { [784, 988, 1175, 1568].forEach((f, i) => this.tone(f, 0.12, 'triangle', 0.12, null, i * 0.06)); },
   crash() { this.noiseHit(0.5, 0.35, 0, 200); this.tone(160, 0.5, 'sawtooth', 0.15, 40); },
   stumble() { this.noiseHit(0.2, 0.2, 0, 600); this.tone(220, 0.2, 'square', 0.08, 120); },
+  horn() { for (const [f, w] of [[311, 0], [370, 0], [311, 0.75], [370, 0.75]]) this.tone(f, 0.6, 'sawtooth', 0.045, f * 0.94, w); },
+  whoosh() { this.noiseHit(0.6, 0.18, 0, 300); },
   // tiny looping beat
   BASS: [45, 0, 45, 0, 48, 0, 45, 0, 43, 0, 43, 0, 40, 0, 43, 0],
   schedule() {
@@ -776,7 +639,7 @@ const Sound = {
 const world = {
   dist: 0, speed: START_SPEED, spawnZ: 60, laneFree: [0, 0, 0], hardUntil: [0, 0, 0],
   nextPower: 160, score: 0, coins: 0, time: 0, saves: 0,
-  palmZ: [0, 0], buildZ: [0, 0], bridgeZ: 120, portalZ: 10,
+  palmZ: [0, 0], buildZ: [0, 0], bridgeZ: 120, portalZ: 10, keepClear: [0, 0, 0], pendingMove: null, nextMoving: 90, movingCount: 0,
 };
 const obstacles = [];
 const coins = [];
@@ -794,7 +657,7 @@ let heroReq = 0;
 let heroReady = null;
 function setHero(id) {
   const req = ++heroReq;
-  heroReady = buildCharacter(charById(id)).then(h => {
+  heroReady = buildCharacter(charById(id), makeJetpackModel).then(h => {
     if (req !== heroReq) return heroReady;
     if (hero) { h.root.rotation.y = hero.root.rotation.y; scene.remove(hero.root); }
     hero = h; scene.add(h.root);
@@ -831,19 +694,59 @@ function placeTrain(L, z, cars, opts = {}) {
   return addObstacle({ type: 'train', L, x: LANES[L], z0: z, z1: z + len, top: TRAIN_TOP, halfW: 1.15, parts, vz: opts.moving ? opts.vz : 0 });
 }
 
-function laneClearAhead(L) {
-  for (const o of obstacles) if (o.L === L && o.z1 > world.dist - 2) return false;
-  return true;
-}
-function movingActive() { return obstacles.some(o => o.vz > 0 && o.z1 > world.dist - 5); }
 
 function canHard(L, z) {
+  if (z < world.keepClear[L]) return false;
   if (L === 1) return world.hardUntil[0] <= z && world.hardUntil[2] <= z;
   return world.hardUntil[1] <= z;
 }
 
+// Oncoming trains: allowed in any lane as long as their whole sweep is empty and an escape lane
+// stays free of trains for the moment they reach you.
+function movingPlan(L, zs) {
+  const v = world.speed, d = world.dist;
+  const u = 10 + clamp(d / 4500, 0, 1) * 7, len = 3 * (CAR_LEN + CAR_GAP);
+  const sMeet = d + v * (zs - d) / (v + u), w0 = sMeet - 14, w1 = sMeet + len * v / (v + u) + 14;
+  const movingIn = l => obstacles.some(o => o.vz > 0 && o.L === l && o.z1 > d - 5);
+  if (movingIn(L)) return null;
+  for (const o of obstacles) if (o.L === L && o.z1 > w0 - 4) return null;
+  const blocked = e => movingIn(e) || obstacles.some(o => o.L === e && o.type === 'train' && o.z1 > w0 && o.z0 < w1);
+  const esc = (L === 1 ? [0, 2] : [1]).filter(e => !blocked(e));
+  return esc.length ? { u, esc, w1 } : null;
+}
+
+function launchMoving(L, z, plan) {
+  const o = placeTrain(L, z + 30, randi(1, 3), { moving: true, vz: plan.u });
+  world.hardUntil[L] = Math.max(world.hardUntil[L], o.z1);
+  world.laneFree[L] = o.z1 + 12;
+  for (const e of plan.esc) world.keepClear[e] = Math.max(world.keepClear[e], plan.w1);
+  world.movingCount = (world.movingCount || 0) + 1;
+}
+// Schedule oncoming trains: reserve a corridor in a lane (and keep an escape lane free of trains),
+// then launch the train into it once the corridor reaches the spawn horizon.
+function scheduleMoving(z, d) {
+  if (world.pendingMove && z >= world.pendingMove.at) {
+    const L = world.pendingMove.L;
+    const plan = movingPlan(L, z + 30);
+    if (plan) launchMoving(L, z, plan);
+    world.pendingMove = null;
+    world.nextMoving = z + rand(30, 80) * (1.15 - d * 0.45);
+  } else if (!world.pendingMove && z >= world.nextMoving && world.dist > 20) {
+    const free = [0, 1, 2].filter(l => world.laneFree[l] <= z);
+    if (!free.length) return;
+    const sides = free.filter(l => l !== 1);
+    const L = sides.length && Math.random() < 0.7 ? pick(sides) : pick(free);
+    const at = z + rand(78, 95);
+    world.pendingMove = { L, at };
+    world.laneFree[L] = at;
+    const esc = L === 1 ? [pick([0, 2])] : [1];
+    for (const e of esc) world.keepClear[e] = Math.max(world.keepClear[e], at + 45);
+  }
+}
+
 function spawnRow(z) {
   const d = clamp(world.dist / 4500, 0, 1);
+  scheduleMoving(z, d);
   const lanes = [0, 1, 2].sort(() => Math.random() - 0.5);
   const r = Math.random();
   const nObs = r < 0.22 ? 1 : r < 0.75 ? 2 : 3;
@@ -852,9 +755,11 @@ function spawnRow(z) {
   for (const L of lanes) {
     if (world.laneFree[L] > z) continue;
     if (used >= nObs) { empty.push(L); continue; }
-    const opts = [['low', 3], ['high', 2.2], ['ramp', 1.6 + d]];
+    const opts = [['low', 3], ['high', 2.2]];
+    if (z >= world.keepClear[L]) opts.push(['ramp', 1.6 + d]);
     if (canHard(L, z)) opts.push(['train', 3.2 + d * 2]);
-    if (L !== 1 && world.dist > 250 && world.hardUntil[1] <= world.dist && !movingActive() && laneClearAhead(L)) opts.push(['moving', 1.2 + d * 2.5]);
+    const plan = world.dist > 30 ? movingPlan(L, z + 30) : null;
+    if (plan) opts.push(['moving', 3.4 + d * 3]);
     const type = weighted(opts);
     used++;
     if (type === 'low') {
@@ -882,9 +787,7 @@ function spawnRow(z) {
       for (let i = 0; i < 3; i++) { const t = (i + 0.5) / 3; addCoin(LANES[L], t * TRAIN_TOP + 0.95, z + t * RAMP_LEN); }
       coinLine(L, z + RAMP_LEN + 1.5, Math.floor((o.z1 - z - RAMP_LEN - 2) / 2.3), TRAIN_TOP + 0.95);
     } else if (type === 'moving') {
-      const o = placeTrain(L, z + 30, randi(1, 2), { moving: true, vz: 8 + d * 6 });
-      world.hardUntil[L] = o.z1;
-      world.laneFree[L] = o.z1 + 12;
+      launchMoving(L, z, plan);
     }
   }
   for (const L of empty) if (Math.random() < 0.5) coinLine(L, z - 3, randi(5, 8));
@@ -945,7 +848,7 @@ function resetRun() {
   clearWorld();
   Object.assign(world, {
     dist: 0, speed: START_SPEED, spawnZ: 55, laneFree: [0, 0, 0], hardUntil: [0, 0, 0],
-    nextPower: 140, score: 0, coins: 0, time: 0, saves: 0, palmZ: [-20, -16], buildZ: [-30, -26], bridgeZ: 140, portalZ: -10,
+    nextPower: 140, score: 0, coins: 0, time: 0, saves: 0, palmZ: [-20, -16], buildZ: [-30, -26], bridgeZ: 140, portalZ: -10, keepClear: [0, 0, 0], pendingMove: null, nextMoving: 90, movingCount: 0,
   });
   Object.assign(player, {
     lane: 1, prevLane: 1, x: 0, y: 0, vy: 0, grounded: true, rolling: 0, jet: 0, boots: 0, magnet: 0, mult: 0,
@@ -1103,6 +1006,8 @@ function startJet() {
   for (let i = pickups.length - 1; i >= 0; i--) if (pickups[i].z > world.dist + 5) { poolPut('pu-' + pickups[i].kind, pickups[i].mesh); pickups.splice(i, 1); }
   world.laneFree = [end + 15, end + 15, end + 15];
   world.hardUntil = [0, 0, 0];
+  world.keepClear = [0, 0, 0];
+  world.pendingMove = null; world.nextMoving = end + 60;
   world.spawnZ = end + 25;
   world.nextPower = Math.max(world.nextPower, end + 120);
   let lane = player.lane;
@@ -1196,6 +1101,17 @@ function gameUpdate(dt) {
       emit(c.x, c.y, c.z, 0xffd23a, rand(-2, 2), rand(1, 3), 0, 0.35, 0.8);
     }
   }
+  // oncoming trains: horn, rumble as they pass, HUD warning when one is in your lane
+  let warn = false;
+  for (const o of obstacles) if (o.vz) {
+    const ahead = o.z0 - d;
+    if (!o.horned && ahead < 85 && ahead > 0) { o.horned = true; Sound.horn(); }
+    if (!o.whooshed && ahead < 6 && Math.abs(o.x - player.x) < 3.2) { o.whooshed = true; Sound.whoosh(); }
+    if (o.z0 < d + 3 && o.z1 > d - 3 && Math.abs(o.x - player.x) < 3.4 && player.jet <= 0) shake = Math.max(shake, 0.07);
+    if (ahead > 0 && ahead < 75 && Math.abs(o.x - LANES[player.lane]) < 0.5 && player.y < TRAIN_TOP - 0.5) warn = true;
+    for (let i = pickups.length - 1; i >= 0; i--) { const p = pickups[i]; if (Math.abs(p.x - o.x) < 1 && p.z > o.z0 - 0.5 && p.z < o.z1) { poolPut('pu-' + p.kind, p.mesh); pickups.splice(i, 1); } }
+  }
+  ui.warn.classList.toggle('show', warn && !save.invincible);
   // moving trains swallow coins in their path
   for (const o of obstacles) if (o.vz) {
     for (let i = coins.length - 1; i >= 0; i--) {
@@ -1253,6 +1169,7 @@ function syncWorld(dt) {
   wallTex.offset.x = d / WALL_LEN;
   wallTexR.offset.x = -d / WALL_LEN;
   for (const o of obstacles) {
+    if (o.vz && state === 'play') for (const [, m] of o.parts) for (const w of m.userData.wheels) w.rotation.x -= o.vz * dt / 0.33;
     for (const [, m] of o.parts) {
       const off = m.userData.off || 0;
       const zz = o.type === 'ramp' ? o.z0 : o.type === 'train' ? o.z0 + off : (o.z0 + o.z1) / 2;
@@ -1278,49 +1195,29 @@ function syncWorld(dt) {
 }
 
 function animateHero(dt, mode) {
-  const h = hero, p = player;
+  const h = hero, p = player, menu = mode === 'menu';
   h.root.position.set(p.x, p.y, 0);
-  h.jet.visible = p.jet > 0 && mode !== 'menu';
+  h.jet.visible = p.jet > 0 && !menu;
   if (h.jet.visible) for (const f of h.jet.userData.flames) f.scale.set(1, 0.7 + Math.random() * 0.6, 1);
-  let pitch = 0;
-  if (mode === 'menu') {
-    playAnim(h, 'Idle', 0.3);
-  } else if (p.dead) {
-    const a = playAnim(h, 'Death', 0.08); if (a) a.timeScale = 1.35;
-  } else if (p.jet > 0) {
-    if (h.cur !== 'Fly') { const a = playAnim(h, 'Fly', 0.2); if (a) { a.time = a.getClip().duration * 0.42; a.paused = true; } }
-    pitch = -0.22;
-  } else if (p.rolling > 0) {
-    if (p.justRolled || h.cur !== 'Roll') { const a = restartAnim(h, 'Roll', 0.06); if (a) a.timeScale = a.getClip().duration / ROLL_T; }
-  } else if (!p.grounded && (p.justJumped || p.airT > 0.05)) {
-    if (p.justJumped || h.cur !== 'Jump') {
-      const a = restartAnim(h, 'Jump', 0.06);
-      if (a) {
-        const dur = a.getClip().duration, skip = 0.22;
-        a.time = dur * skip;
-        a.timeScale = (dur * (1 - skip) * 0.92) / (p.justJumped ? p.airEst : 0.5);
-      }
-    }
-  } else if (p.hitT > 0) {
-    const a = playAnim(h, 'RecieveHit', 0.06); if (a) a.timeScale = 1.6;
-  } else {
-    const a = playAnim(h, 'Run', 0.1);
-    if (a) a.timeScale = 1.05 + clamp((world.speed - START_SPEED) / (MAX_SPEED - START_SPEED), 0, 1) * 0.45;
-    pitch = -0.06;
-  }
+  const speed01 = clamp((world.speed - START_SPEED) / (MAX_SPEED - START_SPEED), 0, 1);
+  if (menu) playAction(h, 'idle', 0.3);
+  else if (p.dead) { const a = playAction(h, 'death', 0.1); a.timeScale = 1.6; }
+  else { const a = playAction(h, 'run', 0.12); a.timeScale = (p.grounded ? 1.05 : 0.45) + speed01 * 0.4; }
+  if (p.justJumped) h.jumpSide = -h.jumpSide;
+  const live = !menu && !p.dead;
+  const rollT = clamp(1 - p.rolling / ROLL_T, 0, 1);
+  updateCharacter(h, dt, {
+    jump: live && !p.grounded && p.jet <= 0 && p.rolling <= 0 ? 1 : 0,
+    roll: live && p.rolling > 0 ? 1 : 0, rollT: rollT * rollT * (3 - 2 * rollT),
+    fly: live && p.jet > 0 ? 1 : 0, hit: live && p.hitT > 0 ? 1 : 0,
+    pitch: live && p.jet > 0 ? -0.25 : live ? -0.05 : 0,
+    speed01, menu, t: world.time,
+  });
   p.justJumped = false; p.justRolled = false;
-  h.mixer.update(dt);
-
-  // procedural lean into lane changes
-  const dx = mode === 'menu' || p.dead ? 0 : LANES[p.lane] - p.x;
+  // lean into lane changes
+  const dx = live ? LANES[p.lane] - p.x : 0;
   h.tilt.rotation.z = damp(h.tilt.rotation.z, clamp(-dx * 0.16, -0.32, 0.32), 14, dt);
   h.tilt.rotation.y = damp(h.tilt.rotation.y, clamp(-dx * 0.14, -0.35, 0.35), 14, dt);
-  h.tilt.rotation.x = damp(h.tilt.rotation.x, pitch, 8, dt);
-  if (h.cape) {
-    const t = performance.now() / 1000;
-    const ang = mode === 'menu' ? -0.12 - Math.sin(t * 2) * 0.04 : -(0.55 + world.speed * 0.02) - Math.sin(t * 15) * 0.12 - (p.jet > 0 ? 0.5 : 0);
-    h.cape.pivot.quaternion.copy(h.cape.rest).multiply(_q.setFromAxisAngle(X_AXIS, ang));
-  }
   h.root.visible = !(player.invuln > 0 && !save.invincible && Math.floor(world.time * 14) % 2 === 0 && state === 'play');
 }
 
@@ -1351,8 +1248,8 @@ function updateCamera(dt, mode) {
   } else {
     const p = player;
     const jetLift = p.jet > 0 ? 1.6 : 0;
-    px = p.x * 0.72; py = 3.6 + p.y * 0.68 + jetLift - p.landK; pz = 6.3;
-    lx = p.x * 0.6; ly = 1.2 + p.y * 0.72; lz = -8;
+    px = p.x * 0.75; py = 3.25 + p.y * 0.68 + jetLift - p.landK; pz = 5.5;
+    lx = p.x * 0.62; ly = 1.3 + p.y * 0.72; lz = -8;
     fov = baseFov + clamp((world.speed - START_SPEED) / (MAX_SPEED - START_SPEED), 0, 1) * 7 + (p.jet > 0 ? 4 : 0);
     p.landK = damp(p.landK, 0, 9, dt);
   }
@@ -1385,6 +1282,9 @@ for (const k of ['jet', 'boots', 'magnet', 'mult']) {
   el.innerHTML = `<span class="ic">${POWER_INFO[k].icon}</span><div class="bar"><b></b></div>`;
   ui.powerups.appendChild(el); puEls[k] = { el, bar: el.querySelector('b') };
 }
+ui.warn = document.createElement('div');
+ui.warn.id = 'warn'; ui.warn.className = 'stroke'; ui.warn.textContent = '⚠ TRAIN!';
+ui.hud.appendChild(ui.warn);
 let toastTimer = 0;
 function toast(msg) { ui.toast.textContent = msg; ui.toast.classList.add('show'); toastTimer = 1.1; }
 
@@ -1422,8 +1322,8 @@ function updateHud() {
 // ---- shop
 let shopTab = 'chars';
 function avatarCss(c) {
-  const k = c.colors, hair = k.Hair || k.Helmet || k.Main, top = k.Shirt || k.Main;
-  return `background:linear-gradient(${hair} 0 24%, ${k.Skin} 24% 52%, ${top} 52% 100%)`;
+  const hair = c.hatColor || c.cowl || c.hoodUp || c.hair;
+  return `background:linear-gradient(${hair} 0 24%, ${c.cowl ? c.cowl : c.skin} 24% 40%, ${c.skin} 40% 52%, ${c.shirt} 52% 100%)`;
 }
 function renderShop() {
   const body = $('shopBody');
@@ -1545,6 +1445,7 @@ function revive() {
     if (o.z0 < world.dist + 45 && o.z1 > world.dist - 3) { releaseObstacle(o); obstacles.splice(i, 1); }
   }
   for (let i = 0; i < 3; i++) { world.laneFree[i] = Math.max(world.laneFree[i], world.dist + 45); world.hardUntil[i] = Math.min(world.hardUntil[i], world.dist); }
+  for (let i = obstacles.length - 1; i >= 0; i--) if (obstacles[i].vz) { releaseObstacle(obstacles[i]); obstacles.splice(i, 1); }
   Object.assign(player, { dead: false, caught: false, invuln: 2.5, stumble: 0, y: floorAt(), vy: 0, rolling: 0, grounded: true, hitT: 0 });
   drone.visible = false;
   state = 'play';
@@ -1589,6 +1490,7 @@ function frame(now) {
     world.time += dt;
   }
 
+  tickCharacters(performance.now() / 1000);
   if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) ui.toast.classList.remove('show'); }
 
   const mode = state === 'menu' || state === 'shop' ? state : (state === 'dying' ? 'dying' : 'play');
@@ -1606,7 +1508,7 @@ function frame(now) {
 }
 
 // expose small debug hook for automated testing
-window.__surf = { world, player, save, get state() { return state; }, act, startGame, give: k => collectPickup({ kind: k }) };
+window.__surf = { get hero() { return hero; }, renderer, world, player, save, obstacles, get state() { return state; }, act, startGame, give: k => collectPickup({ kind: k }), sim: n => { for (let i = 0; i < n; i++) gameUpdate(1 / 60); } };
 
 goMenu();
 {

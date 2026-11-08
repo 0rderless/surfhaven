@@ -10,7 +10,7 @@ An endless rail-runner for your phone. Open it in Safari, tap **Share → Add to
 - Keyboard works too: arrows / WASD / space, `P` to pause
 
 ## Features
-- 3 lanes with parked trains, moving trains (headlights = coming at you), ramps up onto train roofs, low barriers (jump) and DUCK bars (roll)
+- 3 lanes with parked trains, oncoming trains (headlights, horn and a ⚠ TRAIN! warning when one is in your lane), ramps up onto train roofs, low barriers (jump) and DUCK bars (roll)
 - Power-ups: **Jetpack**, **Jumping Boots**, **Coin Magnet**, **2x Score**, plus **Keys**
 - Keys pay for "Save Me" after a crash (1, 2, 4… per run)
 - Side-scrape a train and a security drone starts chasing you; scrape again while it's on you and you're caught
@@ -20,5 +20,5 @@ An endless rail-runner for your phone. Open it in Safari, tap **Share → Add to
 - Works offline after the first load (service worker)
 
 ## Credits
-- Character models and animations: [Quaternius](https://quaternius.com) "Ultimate Animated Character Pack", CC0 (public domain). See `models/LICENSE-Quaternius-CC0.txt`.
+- Character rig and run/idle/death animations: Mixamo (Adobe), via the open-source [Dive](https://github.com/Mugen87/dive) project by Mugen87 (MIT) — the same base as Overcharge. Every outfit, face, hairstyle, hat and accessory is built in code (`characters.js`).
 - 3D engine: [three.js](https://threejs.org) (MIT).
