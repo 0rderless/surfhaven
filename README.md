@@ -15,6 +15,8 @@ An endless rail-runner for your phone. Open it in Safari, tap **Share → Add to
 - Keys pay for "Save Me" after a crash (1, 2, 4… per run)
 - Side-scrape a train and a security drone starts chasing you; scrape again while it's on you and you're caught
 - Pause menu with an **Invincible** toggle (can't crash or get caught) and a sound toggle
+- Mystery boxes: find them on the tracks or grab them free, then open them for coins, keys, headstarts or upgrades
+- Headstart: start a run blasting off on a jetpack
 - Shop where everything is free: 7 characters (Haven, School Boy, Tattoo Girl, Black Boy, Void, Blaze, Volt), power-up upgrades, free keys
 - Progress (best score, coins, keys, upgrades, character) is saved on the device
 - Works offline after the first load (service worker)

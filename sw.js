@@ -1,8 +1,10 @@
 // Network-first service worker: always fetch fresh when online, fall back to cache offline.
-const CACHE = 'surfhaven-v3';
+const CACHE = 'surfhaven-v4';
 const FILES = ['./', './index.html', './game.js', './characters.js', './manifest.webmanifest',
   './lib/three.module.min.js', './lib/GLTFLoader.js', './lib/BufferGeometryUtils.js', './lib/RoundedBoxGeometry.js',
   './lib/RoomEnvironment.js', './lib/SkeletonUtils.js', './lib/femaleBody.js',
+  './lib/EffectComposer.js', './lib/RenderPass.js', './lib/ShaderPass.js', './lib/UnrealBloomPass.js', './lib/OutputPass.js', './lib/Pass.js',
+  './lib/MaskPass.js', './lib/CopyShader.js', './lib/LuminosityHighPassShader.js', './lib/OutputShader.js',
   './models/rig.glb', './models/run.glb',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', e => {

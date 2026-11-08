@@ -1,6 +1,11 @@
 import * as THREE from './lib/three.module.min.js';
 import { RoundedBoxGeometry } from './lib/RoundedBoxGeometry.js';
 import { RoomEnvironment } from './lib/RoomEnvironment.js';
+import { EffectComposer } from './lib/EffectComposer.js';
+import { RenderPass } from './lib/RenderPass.js';
+import { UnrealBloomPass } from './lib/UnrealBloomPass.js';
+import { ShaderPass } from './lib/ShaderPass.js';
+import { OutputPass } from './lib/OutputPass.js';
 import { CHARACTERS, buildCharacter, playAction, updateCharacter, tickCharacters } from './characters.js';
 
 /* =====================================================================
@@ -9,7 +14,7 @@ import { CHARACTERS, buildCharacter, playAction, updateCharacter, tickCharacters
 
 // ---------------------------------------------------------------- save
 const SAVE_KEY = 'surfhaven_v1';
-const DEFAULT_SAVE = { coins: 0, keys: 3, best: 0, char: 'haven', lv: { jet: 0, boots: 0, magnet: 0, mult: 0 }, sound: true, invincible: false };
+const DEFAULT_SAVE = { coins: 0, keys: 3, best: 0, char: 'haven', lv: { jet: 0, boots: 0, magnet: 0, mult: 0 }, sound: true, music: true, invincible: false, boxes: 2, headstarts: 1, gfx: 'high' };
 function loadSave() {
   try {
     const s = JSON.parse(localStorage.getItem(SAVE_KEY));
@@ -39,10 +44,10 @@ const MAX_SPEED = 33;
 const JET_Y = 7.2;
 const MAX_LEVEL = 5;
 const POWER_INFO = {
-  jet:    { name: 'Jetpack',       icon: '🚀', desc: 'Fly over everything and grab sky coins' },
-  boots:  { name: 'Jumping Boots', icon: '👟', desc: 'Super high jumps - reach the train roofs' },
-  magnet: { name: 'Coin Magnet',   icon: '🧲', desc: 'Pulls in every coin around you' },
-  mult:   { name: '2x Score',      icon: '✖️', desc: 'Doubles the score you earn' },
+  jet:    { name: 'Jetpack',       icon: 'i-rocket', desc: 'Fly over everything and grab sky coins' },
+  boots:  { name: 'Jumping Boots', icon: 'i-boots',  desc: 'Huge jumps + pulls in coins under you' },
+  magnet: { name: 'Coin Magnet',   icon: 'i-magnet', desc: 'Pulls in every coin around you' },
+  mult:   { name: '2x Score',      icon: 'i-x2',     desc: 'Doubles the score you earn' },
 };
 const powerDuration = k => 10 + save.lv[k] * 2.5;
 
@@ -63,6 +68,42 @@ scene.fog = new THREE.Fog(FOG_COLOR, 75, 185);
 const camera = new THREE.PerspectiveCamera(72, 1, 0.1, 420);
 camera.position.set(0, 2.2, 4.8);
 
+// ---- post-processing: bloom + colour grade + vignette (High graphics)
+let composer = null;
+const GradeShader = {
+  uniforms: { tDiffuse: { value: null }, uVig: { value: 0.34 }, uSat: { value: 1.14 }, uCon: { value: 1.07 }, uWarm: { value: 0.025 } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float uVig, uSat, uCon, uWarm; varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      float l = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+      c.rgb = mix(vec3(l), c.rgb, uSat);
+      c.rgb = max(vec3(0.0), (c.rgb - 0.18) * uCon + 0.18);
+      c.rgb *= vec3(1.0 + uWarm, 1.0, 1.0 - uWarm);
+      vec2 d = vUv - 0.5; d.x *= 0.75;
+      c.rgb *= 1.0 - uVig * smoothstep(0.22, 0.8, length(d));
+      gl_FragColor = c;
+    }`,
+};
+function setupPost() {
+  if (composer) return;
+  const rt = new THREE.WebGLRenderTarget(4, 4, { type: THREE.HalfFloatType, samples: 4 });
+  composer = new EffectComposer(renderer, rt);
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(256, 256), 0.42, 0.55, 0.86));
+  composer.addPass(new ShaderPass(GradeShader));
+  composer.addPass(new OutputPass());
+}
+function applyGfx() {
+  const high = save.gfx !== 'low';
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, high ? 1.75 : 1.4));
+  if (high) setupPost();
+  resize();
+}
+function renderFrame() {
+  if (composer && save.gfx !== 'low') composer.render(); else renderer.render(scene, camera);
+}
+
 let baseFov = 72;
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
@@ -71,6 +112,7 @@ function resize() {
   baseFov = camera.aspect < 0.7 ? 72 : camera.aspect < 1.2 ? 62 : 52;
   camera.fov = baseFov;
   camera.updateProjectionMatrix();
+  if (composer) { composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(w, h); }
 }
 window.addEventListener('resize', resize);
 resize();
@@ -214,6 +256,26 @@ for (const s of [-1, 1]) {
     g.add(m);
   }
   scene.add(g);
+}
+
+// soft clouds drifting over the skyline
+const clouds = [];
+{
+  const ct = canvasTex(256, 128, (g, w, h) => {
+    for (let i = 0; i < 14; i++) {
+      const x = 40 + Math.random() * 176, y = 58 + Math.random() * 30, r = 22 + Math.random() * 26;
+      const gr = g.createRadialGradient(x, y, 2, x, y, r);
+      gr.addColorStop(0, 'rgba(255,255,255,.95)'); gr.addColorStop(0.6, 'rgba(255,255,255,.6)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+    }
+  });
+  for (let i = 0; i < 9; i++) {
+    const c = new THREE.Sprite(new THREE.SpriteMaterial({ map: ct, fog: false, transparent: true, depthWrite: false, opacity: 0.9 }));
+    const s = rand(70, 130);
+    c.scale.set(s, s * 0.5, 1);
+    c.position.set(rand(-200, 200), rand(48, 95), -rand(250, 290));
+    scene.add(c); clouds.push(c);
+  }
 }
 
 // ---------------------------------------------------------------- pools
@@ -519,8 +581,40 @@ function makeKeyModel() {
   box(0.15, 0.08, 0.09, gold, 0.08, -0.16, 0, g);
   return g;
 }
-const PICKUP_FACTORY = { jet: () => makeJetpackModel(1.15), boots: makeBootsModel, magnet: makeMagnetModel, mult: makeMultModel, key: makeKeyModel };
-const PICKUP_GLOW = { jet: 0xff9a40, boots: 0x6aff8a, magnet: 0xff6060, mult: 0xffc040, key: 0xc080ff };
+// mystery box: purple crate, gold straps and bow, "?" faces, separate lid for the opening animation
+const boxFaceTex = canvasTex(256, 256, (g, w, h) => {
+  const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, '#b273ff'); gr.addColorStop(1, '#5a1fb0');
+  g.fillStyle = gr; g.fillRect(0, 0, w, h);
+  g.strokeStyle = '#ffd24a'; g.lineWidth = 18; g.strokeRect(9, 9, w - 18, h - 18);
+  g.strokeStyle = '#0b1640'; g.lineWidth = 4; g.strokeRect(20, 20, w - 40, h - 40);
+  g.font = '900 150px Arial Black, Arial'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.lineWidth = 16; g.strokeStyle = '#0b1640'; g.strokeText('?', w / 2, h / 2 + 8);
+  g.fillStyle = '#ffffff'; g.fillText('?', w / 2, h / 2 + 8);
+});
+function makeMysteryBox(scale = 1) {
+  const g = new THREE.Group();
+  const face = new THREE.MeshStandardMaterial({ map: boxFaceTex, roughness: 0.45, metalness: 0.1 });
+  const plain = new THREE.MeshStandardMaterial({ color: 0x7a33e0, roughness: 0.45 });
+  const gold = new THREE.MeshStandardMaterial({ color: 0xffc21a, roughness: 0.25, metalness: 0.85, emissive: 0x3a2400 });
+  const body = new THREE.Mesh(new RoundedBoxGeometry(1, 0.82, 1, 3, 0.06), [face, face, plain, plain, face, face]);
+  body.position.y = 0.41; g.add(body);
+  for (const r of [0, Math.PI / 2]) { const band = new THREE.Mesh(new THREE.BoxGeometry(1.04, 0.84, 0.16), gold); band.position.y = 0.41; band.rotation.y = r; g.add(band); }
+  const lid = new THREE.Group(); lid.position.y = 0.82; g.add(lid);
+  const lidBox = new THREE.Mesh(new RoundedBoxGeometry(1.1, 0.24, 1.1, 3, 0.06), new THREE.MeshStandardMaterial({ color: 0x9a4dff, roughness: 0.4 }));
+  lidBox.position.y = 0.12; lid.add(lidBox);
+  for (const r of [0, Math.PI / 2]) { const band = new THREE.Mesh(new THREE.BoxGeometry(1.14, 0.26, 0.17), gold); band.position.y = 0.12; band.rotation.y = r; lid.add(band); }
+  for (const s of [-1, 1]) {
+    const loop = new THREE.Mesh(new THREE.TorusGeometry(0.15, 0.055, 10, 20), gold);
+    loop.position.set(s * 0.15, 0.36, 0); loop.rotation.set(0, Math.PI / 2, s * 0.6); loop.scale.set(1, 1.2, 1); lid.add(loop);
+  }
+  const knot = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 10), gold); knot.position.y = 0.28; lid.add(knot);
+  g.userData.lid = lid;
+  g.scale.setScalar(scale);
+  return g;
+}
+const PICKUP_FACTORY = { jet: () => makeJetpackModel(1.15), boots: makeBootsModel, magnet: makeMagnetModel, mult: makeMultModel, key: makeKeyModel,
+  box: () => { const b = makeMysteryBox(0.62); b.position.y = -0.3; return b; } };
+const PICKUP_GLOW = { jet: 0xff9a40, boots: 0x6aff8a, magnet: 0xff6060, mult: 0xffc040, key: 0xc080ff, box: 0xc77dff };
 
 // ---------------------------------------------------------------- character builder
 // (lives in characters.js)
@@ -615,10 +709,13 @@ const Sound = {
   stumble() { this.noiseHit(0.2, 0.2, 0, 600); this.tone(220, 0.2, 'square', 0.08, 120); },
   horn() { for (const [f, w] of [[311, 0], [370, 0], [311, 0.75], [370, 0.75]]) this.tone(f, 0.6, 'sawtooth', 0.045, f * 0.94, w); },
   whoosh() { this.noiseHit(0.6, 0.18, 0, 300); },
+  click() { this.tone(700, 0.05, 'triangle', 0.14); this.tone(1050, 0.06, 'triangle', 0.08, null, 0.03); },
+  rattle() { for (let i = 0; i < 9; i++) { this.noiseHit(0.05, 0.1 + i * 0.012, i * 0.09, 1400); this.tone(220 + i * 30, 0.05, 'square', 0.03, null, i * 0.09); } },
+  fanfare() { [523, 659, 784, 1047, 1319].forEach((f, i) => this.tone(f, 0.22, 'square', 0.07, null, i * 0.075)); this.tone(1568, 0.6, 'triangle', 0.1, null, 0.4); },
   // tiny looping beat
   BASS: [45, 0, 45, 0, 48, 0, 45, 0, 43, 0, 43, 0, 40, 0, 43, 0],
   schedule() {
-    if (!this.ctx || !this.playing || !save.sound) return;
+    if (!this.ctx || !this.playing || !save.sound || !save.music) return;
     const spb = 60 / 128 / 4;
     while (this.nextNote < this.ctx.currentTime + 0.12) {
       const when = this.nextNote - this.ctx.currentTime;
@@ -794,7 +891,7 @@ function spawnRow(z) {
 
   if (z >= world.nextPower && empty.length) {
     const L = empty[0];
-    const kind = weighted([['magnet', 30], ['jet', 18], ['boots', 22], ['mult', 20], ['key', 10]]);
+    const kind = weighted([['magnet', 28], ['jet', 17], ['boots', 21], ['mult', 18], ['key', 9], ['box', 14]]);
     const m = poolGet('pu-' + kind, () => {
       const g = new THREE.Group(); const inner = PICKUP_FACTORY[kind](); g.add(inner);
       g.add(glowSprite(PICKUP_GLOW[kind], 2.2)); g.userData.inner = inner; return g;
@@ -848,7 +945,7 @@ function resetRun() {
   clearWorld();
   Object.assign(world, {
     dist: 0, speed: START_SPEED, spawnZ: 55, laneFree: [0, 0, 0], hardUntil: [0, 0, 0],
-    nextPower: 140, score: 0, coins: 0, time: 0, saves: 0, palmZ: [-20, -16], buildZ: [-30, -26], bridgeZ: 140, portalZ: -10, keepClear: [0, 0, 0], pendingMove: null, nextMoving: 90, movingCount: 0,
+    nextPower: 140, score: 0, coins: 0, boxes: 0, time: 0, saves: 0, palmZ: [-20, -16], buildZ: [-30, -26], bridgeZ: 140, portalZ: -10, keepClear: [0, 0, 0], pendingMove: null, nextMoving: 90, movingCount: 0,
   });
   Object.assign(player, {
     lane: 1, prevLane: 1, x: 0, y: 0, vy: 0, grounded: true, rolling: 0, jet: 0, boots: 0, magnet: 0, mult: 0,
@@ -993,8 +1090,8 @@ function die(caught) {
   if (caught) drone.visible = true;
 }
 
-function startJet() {
-  const dur = powerDuration('jet');
+function startJet(durOverride) {
+  const dur = durOverride || powerDuration('jet');
   player.jet = dur; player.jetMax = dur;
   player.rolling = 0;
   const end = world.dist + dur * world.speed * 1.04;
@@ -1020,11 +1117,12 @@ function startJet() {
 function collectPickup(p) {
   Sound.power();
   const k = p.kind;
-  if (k === 'key') { save.keys++; persist(); Sound.key(); toast('+1 🔑'); return; }
-  if (k === 'jet') { startJet(); toast('JETPACK!'); }
-  if (k === 'boots') { const d = powerDuration('boots'); player.boots = d; player.bootsMax = d; toast('JUMP BOOTS!'); }
-  if (k === 'magnet') { const d = powerDuration('magnet'); player.magnet = d; player.magnetMax = d; toast('MAGNET!'); }
-  if (k === 'mult') { const d = powerDuration('mult'); player.mult = d; player.multMax = d; toast('2X SCORE!'); }
+  if (k === 'key') { save.keys++; persist(); Sound.key(); toast('+1 KEY', 'i-key'); return; }
+  if (k === 'box') { save.boxes++; world.boxes++; persist(); Sound.key(); toast('MYSTERY BOX!', 'i-box'); return; }
+  if (k === 'jet') { startJet(); toast('JETPACK!', 'i-rocket'); }
+  if (k === 'boots') { const d = powerDuration('boots'); player.boots = d; player.bootsMax = d; toast('JUMP BOOTS!', 'i-boots'); }
+  if (k === 'magnet') { const d = powerDuration('magnet'); player.magnet = d; player.magnetMax = d; toast('MAGNET!', 'i-magnet'); }
+  if (k === 'mult') { const d = powerDuration('mult'); player.mult = d; player.multMax = d; toast('2X SCORE!', 'i-x2'); }
 }
 
 function gameUpdate(dt) {
@@ -1244,7 +1342,8 @@ function updateCamera(dt, mode) {
   if (!play) {
     const t = performance.now() / 1000;
     if (mode === 'shop') { px = 0; py = 1.3; pz = 5.0; lx = 0; ly = -1.1; lz = 0; }
-    else { px = Math.sin(t * 0.3) * 0.6; py = 2.2; pz = 5.6; lx = 0; ly = 1.9; lz = 0; }
+    else if (mode === 'box') { px = 0; py = 1.9; pz = 4.3; lx = 0; ly = 1.0; lz = 0; }
+    else { px = Math.sin(t * 0.3) * 0.35; py = 1.5; pz = 5.4; lx = 0; ly = 1.08; lz = 0; }
   } else {
     const p = player;
     const jetLift = p.jet > 0 ? 1.6 : 0;
@@ -1272,101 +1371,273 @@ function updateCamera(dt, mode) {
 
 // ---------------------------------------------------------------- UI
 const $ = id => document.getElementById(id);
+const icon = (id, cls = 'ic') => `<svg class="${cls}"><use href="#${id}"/></svg>`;
 const ui = {
   hud: $('hud'), score: $('score'), coins: $('coins'), mult: $('multBadge'), powerups: $('powerups'), inv: $('invBadge'), toast: $('toast'),
-  menu: $('menu'), shop: $('shop'), pause: $('pause'), saveme: $('saveme'), over: $('over'), countdown: $('countdown'),
+  warn: $('warn'), boxPill: $('boxPill'), boxRun: $('boxRun'), countdown: $('countdown'),
 };
+const SCREENS = ['menu', 'shop', 'settings', 'pause', 'saveme', 'over', 'boxScreen'];
+
+// radial power-up timers
 const puEls = {};
 for (const k of ['jet', 'boots', 'magnet', 'mult']) {
   const el = document.createElement('div'); el.className = 'pu';
-  el.innerHTML = `<span class="ic">${POWER_INFO[k].icon}</span><div class="bar"><b></b></div>`;
-  ui.powerups.appendChild(el); puEls[k] = { el, bar: el.querySelector('b') };
+  el.innerHTML = `<svg class="ring" viewBox="0 0 52 52"><circle class="bgc" cx="26" cy="26" r="22"/><circle class="fgc" cx="26" cy="26" r="18"/></svg>${icon(POWER_INFO[k].icon, 'ico')}`;
+  ui.powerups.appendChild(el); puEls[k] = { el, ring: el.querySelector('.fgc') };
 }
-ui.warn = document.createElement('div');
-ui.warn.id = 'warn'; ui.warn.className = 'stroke'; ui.warn.textContent = '⚠ TRAIN!';
-ui.hud.appendChild(ui.warn);
 let toastTimer = 0;
-function toast(msg) { ui.toast.textContent = msg; ui.toast.classList.add('show'); toastTimer = 1.1; }
-
-function showScreen(name) {
-  for (const s of ['menu', 'shop', 'pause', 'saveme', 'over']) ui[s].classList.toggle('show', s === name);
-  ui.hud.classList.toggle('show', ['play', 'paused', 'saveme', 'dying'].includes(name));
+function toast(msg, ic) {
+  ui.toast.innerHTML = (ic ? icon(ic) : '') + `<span>${msg}</span>`;
+  ui.toast.classList.remove('show'); void ui.toast.offsetWidth; ui.toast.classList.add('show');
+  toastTimer = 1.15;
 }
+function showScreen(name) {
+  for (const s of SCREENS) $(s).classList.toggle('show', s === name);
+  ui.hud.classList.toggle('show', ['play', 'pause', 'saveme', 'dying', 'countdown'].includes(name));
+}
+const fmt = n => Math.floor(n).toLocaleString();
 function refreshMenu() {
-  $('bestTxt').textContent = save.best.toLocaleString();
-  $('bankTxt').textContent = save.coins.toLocaleString();
+  $('bestTxt').textContent = fmt(save.best);
+  $('bankTxt').textContent = fmt(save.coins);
   $('keysTxt').textContent = save.keys;
+  $('boxesTxt').textContent = save.boxes;
+  const b = $('boxBadge'); b.textContent = save.boxes; b.classList.toggle('zero', save.boxes <= 0);
+  const idx = CHARACTERS.findIndex(c => c.id === save.char);
   $('charLabel').textContent = charById(save.char).name.toUpperCase();
+  $('charDots').innerHTML = CHARACTERS.map((_, i) => `<i class="${i === idx ? 'on' : ''}"></i>`).join('');
+}
+function refreshSwitches() {
+  document.querySelectorAll('.sw[data-set]').forEach(sw => sw.classList.toggle('on', !!save[sw.dataset.set]));
+  document.querySelectorAll('[data-gfx]').forEach(b => b.classList.toggle('on', (save.gfx || 'high') === b.dataset.gfx));
 }
 let lastHud = '';
 function updateHud() {
-  const sc = Math.floor(world.score);
-  const m = player.mult > 0 ? 2 : 1;
-  const key = sc + '|' + world.coins + '|' + m;
+  const sc = Math.floor(world.score), m = player.mult > 0 ? 2 : 1;
+  const key = sc + '|' + world.coins + '|' + m + '|' + world.boxes;
   if (key !== lastHud) {
     lastHud = key;
-    ui.score.textContent = sc.toLocaleString();
-    ui.coins.textContent = world.coins.toLocaleString();
+    ui.score.textContent = fmt(sc);
+    ui.coins.textContent = fmt(world.coins);
     ui.mult.textContent = 'x' + m;
     ui.mult.classList.toggle('hot', m > 1);
+    ui.boxPill.style.display = world.boxes > 0 ? 'flex' : 'none';
+    ui.boxRun.textContent = world.boxes;
   }
   const map = { jet: [player.jet, player.jetMax], boots: [player.boots, player.bootsMax], magnet: [player.magnet, player.magnetMax], mult: [player.mult, player.multMax] };
   for (const k in map) {
     const [v, mx] = map[k];
     puEls[k].el.classList.toggle('show', v > 0);
-    if (v > 0) puEls[k].bar.style.width = (100 * v / mx).toFixed(1) + '%';
+    if (v > 0) puEls[k].ring.style.strokeDashoffset = (113 * (1 - v / mx)).toFixed(1);
   }
-  ui.inv.style.display = save.invincible ? 'block' : 'none';
+  ui.inv.style.display = save.invincible ? 'flex' : 'none';
+}
+
+// ---- character portraits for the shop, rendered from the real 3D characters
+const portraits = {};
+async function makePortraits() {
+  const S = 256;
+  const rt = new THREE.WebGLRenderTarget(S, S, { samples: 4 });
+  rt.texture.colorSpace = THREE.SRGBColorSpace;
+  const ps = new THREE.Scene();
+  ps.environment = scene.environment;
+  ps.add(new THREE.HemisphereLight(0xeaf4ff, 0x8a7a6a, 1.5));
+  const dl = new THREE.DirectionalLight(0xffffff, 2.6); dl.position.set(2, 4, 5); ps.add(dl);
+  const cam = new THREE.PerspectiveCamera(30, 1, 0.1, 20); cam.position.set(0, 1.56, 2.35); cam.lookAt(0, 1.42, 0);
+  const buf = new Uint8Array(S * S * 4), cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const g = cv.getContext('2d'), img = g.createImageData(S, S);
+  for (const def of CHARACTERS) {
+    await new Promise(r => setTimeout(r, 60));
+    try {
+      const h = await buildCharacter(def, makeJetpackModel);
+      h.root.rotation.y = Math.PI + 0.32;
+      ps.add(h.root);
+      playAction(h, 'idle', 0);
+      updateCharacter(h, 0.7, { jump: 0, roll: 0, rollT: 0, fly: 0, hit: 0, speed01: 0, menu: true, t: 1 });
+      renderer.setRenderTarget(rt); renderer.setClearColor(0x000000, 0); renderer.clear();
+      renderer.render(ps, cam);
+      renderer.readRenderTargetPixels(rt, 0, 0, S, S, buf);
+      renderer.setRenderTarget(null); renderer.setClearColor(0x000000, 1);
+      for (let y = 0; y < S; y++) img.data.set(buf.subarray((S - 1 - y) * S * 4, (S - y) * S * 4), y * S * 4);
+      g.clearRect(0, 0, S, S); g.putImageData(img, 0, 0);
+      portraits[def.id] = cv.toDataURL('image/png');
+      ps.remove(h.root);
+    } catch (e) { console.warn('portrait failed', def.id, e); }
+  }
+  rt.dispose();
+  if (state === 'shop') renderShop();
 }
 
 // ---- shop
 let shopTab = 'chars';
-function avatarCss(c) {
-  const hair = c.hatColor || c.cowl || c.hoodUp || c.hair;
-  return `background:linear-gradient(${hair} 0 24%, ${c.cowl ? c.cowl : c.skin} 24% 40%, ${c.skin} 40% 52%, ${c.shirt} 52% 100%)`;
-}
 function renderShop() {
   const body = $('shopBody');
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === shopTab));
   if (shopTab === 'chars') {
-    body.innerHTML = '<div class="grid">' + CHARACTERS.map(c => `
-      <div class="card ${save.char === c.id ? 'sel' : ''}">
-        <span class="ribbon">FREE</span>
-        <div class="av" style="${avatarCss(c)}"></div>
-        <div class="nm stroke">${c.name}</div>
-        <button class="btn small ${save.char === c.id ? 'yellow' : ''}" data-char="${c.id}" style="${save.char === c.id ? 'box-shadow:0 4px 0 #c48a00' : ''}">${save.char === c.id ? 'SELECTED' : 'SELECT'}</button>
-      </div>`).join('') + '</div>';
+    body.innerHTML = '<div class="grid">' + CHARACTERS.map(c => {
+      const sel = save.char === c.id;
+      const por = portraits[c.id] ? `<img src="${portraits[c.id]}" alt="">` : `<div class="ph" style="background:linear-gradient(${c.hatColor || c.cowl || c.hoodUp || c.hair} 0 30%, ${c.skin} 30% 55%, ${c.shirt} 55%)"></div>`;
+      return `<div class="card ${sel ? 'sel' : ''}"><span class="free">FREE</span><div class="por">${por}</div>
+        <div class="nm">${c.name}</div>
+        <button class="btn btn-sm ${sel ? 'btn-yellow' : ''}" data-char="${c.id}">${sel ? 'SELECTED' : 'SELECT'}</button></div>`;
+    }).join('') + '</div>';
   } else if (shopTab === 'power') {
     body.innerHTML = '<div class="list">' + Object.entries(POWER_INFO).map(([k, info]) => {
       const lv = save.lv[k];
-      return `<div class="item"><div class="ic">${info.icon}</div><div class="tx"><b class="stroke">${info.name}</b>
+      return `<div class="item"><div class="icw">${icon(info.icon)}</div><div class="tx"><b>${info.name}</b>
         <small>${info.desc} · lasts ${powerDuration(k)}s</small>
         <div class="pips">${Array.from({ length: MAX_LEVEL }, (_, i) => `<i class="${i < lv ? 'on' : ''}"></i>`).join('')}</div></div>
-        <button class="btn small" data-up="${k}" ${lv >= MAX_LEVEL ? 'disabled' : ''}>${lv >= MAX_LEVEL ? 'MAX' : 'UPGRADE<br>FREE'}</button></div>`;
+        <button class="btn btn-sm" data-up="${k}" ${lv >= MAX_LEVEL ? 'disabled' : ''}>${lv >= MAX_LEVEL ? 'MAXED' : 'UPGRADE'}</button></div>`;
     }).join('') + '</div>';
   } else {
-    body.innerHTML = `<div class="list">
-      <div class="item"><div class="ic">🔑</div><div class="tx"><b class="stroke">5 Keys</b><small>Keys save you after a crash. You have ${save.keys}.</small></div><button class="btn small" data-item="keys">GET<br>FREE</button></div>
-      <div class="item"><div class="ic">🪙</div><div class="tx"><b class="stroke">1,000 Coins</b><small>Bank: ${save.coins.toLocaleString()}</small></div><button class="btn small" data-item="coins">GET<br>FREE</button></div>
-      <div class="item"><div class="ic">⭐</div><div class="tx"><b class="stroke">Max Everything</b><small>All power-ups to max level</small></div><button class="btn small" data-item="max">GET<br>FREE</button></div>
-    </div>`;
+    const it = (ic, name, desc, act, label = 'FREE') => `<div class="item"><div class="icw">${icon(ic)}</div><div class="tx"><b>${name}</b><small>${desc}</small></div>
+      <button class="btn btn-sm ${act === 'box' ? 'btn-purple' : ''}" data-item="${act}">${label}</button></div>`;
+    body.innerHTML = '<div class="list">' +
+      it('i-box', 'Mystery Box', `Coins, keys, headstarts or upgrades. You have ${save.boxes}.`, 'box') +
+      it('i-key', '5 Keys', `Keys save you after a crash. You have ${save.keys}.`, 'keys') +
+      it('i-rocket', 'Headstart', `Blast off with a jetpack at the start of a run. You have ${save.headstarts}.`, 'headstart') +
+      it('i-coin', '1,000 Coins', `Bank: ${fmt(save.coins)}`, 'coins') +
+      it('i-star', 'Max Everything', 'Every power-up to max level', 'max') + '</div>';
   }
 }
 $('shopBody').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
-  Sound.init();
-  if (b.dataset.char) { save.char = b.dataset.char; setHero(save.char); Sound.coin(); }
+  if (b.dataset.char) { save.char = b.dataset.char; setHero(save.char); }
   if (b.dataset.up) { save.lv[b.dataset.up] = Math.min(MAX_LEVEL, save.lv[b.dataset.up] + 1); Sound.power(); }
+  if (b.dataset.item === 'box') { save.boxes++; Sound.key(); }
   if (b.dataset.item === 'keys') { save.keys += 5; Sound.key(); }
+  if (b.dataset.item === 'headstart') { save.headstarts++; Sound.key(); }
   if (b.dataset.item === 'coins') { save.coins += 1000; Sound.coin(); }
   if (b.dataset.item === 'max') { for (const k in save.lv) save.lv[k] = MAX_LEVEL; Sound.power(); }
   persist(); renderShop(); refreshMenu();
 });
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => { shopTab = t.dataset.tab; renderShop(); }));
+// every button clicks
+document.addEventListener('pointerdown', e => { if (e.target.closest('button')) { Sound.init(); Sound.click(); } });
+
+// ---- mystery boxes
+const REWARDS = [
+  { w: 26, kind: 'coins', n: 150, rar: 'COMMON' }, { w: 24, kind: 'coins', n: 300, rar: 'COMMON' }, { w: 15, kind: 'coins', n: 600, rar: 'RARE' },
+  { w: 8, kind: 'coins', n: 1000, rar: 'RARE' }, { w: 2, kind: 'coins', n: 5000, rar: 'JACKPOT' }, { w: 10, kind: 'keys', n: 1, rar: 'RARE' },
+  { w: 4, kind: 'keys', n: 3, rar: 'EPIC' }, { w: 6, kind: 'headstart', n: 1, rar: 'EPIC' }, { w: 5, kind: 'upgrade', n: 1, rar: 'EPIC' },
+];
+const RAR_BG = { COMMON: 'linear-gradient(#a9b6c8,#6f7f99)', RARE: 'linear-gradient(#6cc0ff,#1f6ff0)', EPIC: 'linear-gradient(#c58cff,#7a2fe0)', JACKPOT: 'linear-gradient(#ffe766,#ff9a00)' };
+const raysTex = canvasTex(256, 256, (g, w, h) => {
+  g.translate(w / 2, h / 2);
+  for (let i = 0; i < 14; i++) {
+    g.rotate(Math.PI * 2 / 14);
+    const gr = g.createLinearGradient(0, 0, 0, -128); gr.addColorStop(0, 'rgba(255,240,170,.9)'); gr.addColorStop(1, 'rgba(255,200,60,0)');
+    g.fillStyle = gr; g.beginPath(); g.moveTo(0, 0); g.lineTo(-14, -128); g.lineTo(14, -128); g.fill();
+  }
+});
+const boxFx = { group: null, lid: null, rays: null, glow: null, phase: 'idle', t: 0, lidV: 0 };
+function ensureBoxFx() {
+  if (boxFx.group) return;
+  boxFx.group = makeMysteryBox(1.05);
+  boxFx.group.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  boxFx.lid = boxFx.group.userData.lid;
+  boxFx.rays = new THREE.Sprite(new THREE.SpriteMaterial({ map: raysTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, color: 0xffe9a0 }));
+  boxFx.rays.position.set(0, 1.0, -0.6);
+  boxFx.glow = glowSprite(0xc77dff, 3.2); boxFx.glow.position.set(0, 0.5, -0.3);
+  boxFx.holder = new THREE.Group(); boxFx.holder.add(boxFx.rays, boxFx.glow, boxFx.group);
+  boxFx.holder.visible = false;
+  scene.add(boxFx.holder);
+}
+function resetBox() {
+  ensureBoxFx();
+  const g = boxFx.group;
+  g.position.set(0, 0, 0); g.rotation.set(0, 0, 0); g.scale.setScalar(1.05);
+  boxFx.lid.position.set(0, 0.82, 0); boxFx.lid.rotation.set(0, 0, 0);
+  boxFx.rays.visible = false; boxFx.rays.scale.setScalar(0.1);
+  boxFx.t = 0;
+  boxFx.phase = save.boxes > 0 ? 'idle' : 'empty';
+  g.visible = save.boxes > 0;
+  $('reward').classList.remove('show');
+  updateBoxUI();
+}
+function updateBoxUI() {
+  const p = boxFx.phase;
+  $('boxLeft').textContent = save.boxes;
+  $('boxHint').style.visibility = p === 'idle' || p === 'empty' ? 'visible' : 'hidden';
+  $('boxHint').textContent = p === 'empty' ? 'NO BOXES LEFT' : 'TAP TO OPEN!';
+  $('boxNext').style.display = p === 'open' && save.boxes > 0 ? 'flex' : 'none';
+  $('boxFree').style.display = (p === 'open' || p === 'empty') && save.boxes === 0 ? 'flex' : 'none';
+  $('boxDone').style.display = p === 'shake' || p === 'burst' ? 'none' : 'flex';
+}
+function enterBoxes() {
+  state = 'box';
+  showScreen('boxScreen');
+  resetBox();
+  boxFx.holder.visible = true;
+  Sound.stopMusic();
+}
+function openBox() {
+  if (boxFx.phase !== 'idle' || save.boxes <= 0) return;
+  save.boxes--; persist();
+  boxFx.phase = 'shake'; boxFx.t = 0;
+  Sound.rattle();
+  updateBoxUI();
+}
+function applyReward() {
+  let r = weighted(REWARDS.map(x => [x, x.w]));
+  let iconId = 'i-coin', name = '';
+  if (r.kind === 'upgrade') {
+    const open = Object.keys(save.lv).filter(k => save.lv[k] < MAX_LEVEL);
+    if (!open.length) r = { kind: 'coins', n: 1000, rar: 'RARE' };
+    else { const k = pick(open); save.lv[k]++; iconId = POWER_INFO[k].icon; name = `${POWER_INFO[k].name.toUpperCase()} LV ${save.lv[k]}`; }
+  }
+  if (r.kind === 'coins') { save.coins += r.n; iconId = 'i-coin'; name = `+${fmt(r.n)} COINS`; }
+  if (r.kind === 'keys') { save.keys += r.n; iconId = 'i-key'; name = `+${r.n} KEY${r.n > 1 ? 'S' : ''}`; }
+  if (r.kind === 'headstart') { save.headstarts += r.n; iconId = 'i-rocket'; name = 'HEADSTART'; }
+  persist();
+  $('rewardUse').setAttribute('href', '#' + iconId);
+  $('rewardName').textContent = name;
+  const rs = $('rewardRarity'); rs.textContent = r.rar === 'JACKPOT' ? 'JACKPOT!' : r.rar; rs.style.background = RAR_BG[r.rar];
+  $('reward').classList.add('show');
+}
+function updateBoxFx(dt) {
+  if (!boxFx.holder || !boxFx.holder.visible) return;
+  const g = boxFx.group, f = boxFx;
+  f.t += dt;
+  f.glow.material.opacity = 0.55 + 0.25 * Math.sin(f.t * 3);
+  if (f.phase === 'idle') {
+    g.position.y = 0.05 + Math.sin(f.t * 2.2) * 0.06;
+    g.rotation.y = Math.sin(f.t * 0.9) * 0.35;
+    g.rotation.z = 0;
+  } else if (f.phase === 'shake') {
+    const k = Math.min(1, f.t / 1.0);
+    g.rotation.z = Math.sin(f.t * 65) * 0.14 * k;
+    g.rotation.y = Math.sin(f.t * 47) * 0.1 * k;
+    g.scale.setScalar(1.05 + k * 0.12 + Math.sin(f.t * 30) * 0.02 * k);
+    if (f.t >= 1.0) {
+      f.phase = 'burst'; f.t = 0; f.lidV = 7.5;
+      f.rays.visible = true;
+      Sound.fanfare();
+      shake = 0.25;
+      for (let i = 0; i < 40; i++) emit(rand(-0.3, 0.3), 1.0, rand(-0.3, 0.3), pick([0xffd23a, 0xff4fa3, 0x5ce1ff, 0x8ef05a, 0xc77dff]), rand(-3.5, 3.5), rand(3, 7), rand(-3, 1.5), rand(0.8, 1.4), 1.3);
+      setTimeout(() => { if (f.phase === 'burst') { applyReward(); f.phase = 'open'; updateBoxUI(); refreshMenu(); } }, 280);
+    }
+  } else if (f.phase === 'burst' || f.phase === 'open') {
+    g.rotation.z = damp(g.rotation.z, 0, 10, dt);
+    g.scale.setScalar(damp(g.scale.x, 1.0, 6, dt));
+    f.lidV -= 16 * dt;
+    f.lid.position.y = Math.max(0.82, f.lid.position.y + f.lidV * dt);
+    f.lid.rotation.x += dt * 5 * (f.lid.position.y > 0.83 ? 1 : 0);
+    f.lid.position.z -= dt * 1.2 * (f.lid.position.y > 0.83 ? 1 : 0);
+    if (f.lid.position.y <= 0.82 && f.lidV < 0) { f.lid.visible = false; }
+    f.rays.scale.setScalar(damp(f.rays.scale.x, 5.5, 4, dt));
+    f.rays.material.rotation += dt * 0.6;
+    g.position.y = damp(g.position.y, -0.35, 4, dt);
+  }
+  if (f.phase === 'idle' || f.phase === 'shake') f.lid.visible = true;
+}
+$('boxScreen').addEventListener('click', e => { if (!e.target.closest('button')) openBox(); });
+$('boxNext').addEventListener('click', () => { resetBox(); openBox(); });
+$('boxFree').addEventListener('click', () => { save.boxes++; persist(); refreshMenu(); resetBox(); });
+$('boxDone').addEventListener('click', () => { boxFx.holder.visible = false; goMenu(); });
 
 // ---------------------------------------------------------------- state machine
-let state = 'menu';
-let saveTimer = 0;
+let state = 'loading';
+let saveTimer = 0, hsTimer = 0;
 const SAVE_TIME = 4;
 
 function goMenu() {
@@ -1374,8 +1645,9 @@ function goMenu() {
   clearWorld();
   world.dist = 0; world.time = 0;
   Object.assign(world, { palmZ: [-20, -16], buildZ: [-30, -26], bridgeZ: 140, portalZ: -10 });
-  Object.assign(player, { lane: 1, x: 0, y: 0, vy: 0, dead: false, rolling: 0, jet: 0, boots: 0, magnet: 0, mult: 0, stumble: 0, invuln: 0 });
+  Object.assign(player, { lane: 1, x: 0, y: 0, vy: 0, dead: false, rolling: 0, jet: 0, boots: 0, magnet: 0, mult: 0, stumble: 0, invuln: 0, grounded: true });
   drone.visible = false;
+  if (boxFx.holder) boxFx.holder.visible = false;
   spawnScenery(120);
   refreshMenu();
   showScreen('menu');
@@ -1386,44 +1658,70 @@ async function startGame() {
   if (state === 'play' || state === 'starting') return;
   state = 'starting';
   await heroReady;
+  if (boxFx.holder) boxFx.holder.visible = false;
   resetRun();
   state = 'play';
   showScreen('play');
   Sound.startMusic();
   lastHud = '';
+  hsTimer = save.headstarts > 0 ? 4 : 0;
+  $('hsCount').textContent = save.headstarts > 1 ? 'x' + save.headstarts : '';
+  $('headstartBtn').classList.toggle('show', hsTimer > 0);
+}
+function useHeadstart() {
+  if (state !== 'play' || save.headstarts <= 0 || hsTimer <= 0) return;
+  save.headstarts--; persist();
+  hsTimer = 0; $('headstartBtn').classList.remove('show');
+  startJet(7.5); player.invuln = 1;
+  toast('HEADSTART!', 'i-rocket'); Sound.power();
 }
 function pauseGame() {
   if (state !== 'play') return;
   state = 'paused';
-  $('invSw').classList.toggle('on', save.invincible);
-  $('sndSw').classList.toggle('on', save.sound);
+  refreshSwitches();
   showScreen('pause');
   Sound.stopMusic();
 }
 function resumeGame() {
   if (state !== 'paused') return;
-  showScreen('play');
+  showScreen('countdown');
   let n = 3;
   state = 'countdown';
-  ui.countdown.textContent = n; ui.countdown.classList.add('show');
+  const show = () => { ui.countdown.innerHTML = `<span>${n}</span>`; };
+  show(); ui.countdown.classList.add('show');
   const iv = setInterval(() => {
     n--;
-    if (n <= 0) { clearInterval(iv); ui.countdown.classList.remove('show'); state = 'play'; Sound.startMusic(); input.queue.length = 0; }
-    else ui.countdown.textContent = n;
+    if (n <= 0) { clearInterval(iv); ui.countdown.classList.remove('show'); state = 'play'; showScreen('play'); Sound.startMusic(); input.queue.length = 0; }
+    else { show(); Sound.click(); }
   }, 450);
+}
+function countUp(el, to, dur = 900, prefix = '') {
+  const t0 = performance.now();
+  const step = now => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = prefix + fmt(to * e);
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 function finishRun() {
   state = 'over';
+  $('headstartBtn').classList.remove('show');
   const sc = Math.floor(world.score);
-  const isBest = sc > save.best;
+  const isBest = sc > save.best && sc > 0;
   save.best = Math.max(save.best, sc);
   save.coins += world.coins;
   persist();
-  $('finalScore').textContent = sc.toLocaleString();
-  $('finalCoins').textContent = '+' + world.coins.toLocaleString();
-  $('finalBest').textContent = save.best.toLocaleString();
-  $('newBest').style.display = isBest && sc > 0 ? 'block' : 'none';
   showScreen('over');
+  countUp($('finalScore'), sc, 1000);
+  countUp($('finalCoins'), world.coins, 800, '+');
+  $('finalBoxes').textContent = '+' + world.boxes;
+  $('boxRow').style.display = world.boxes > 0 ? 'flex' : 'none';
+  $('finalBest').textContent = fmt(save.best);
+  const nb = $('newBest'); nb.classList.remove('show'); void nb.offsetWidth; nb.classList.toggle('show', isBest);
+  $('openBoxesBtn').style.display = save.boxes > 0 ? 'flex' : 'none';
+  $('openBoxesBtn').querySelector('span').textContent = `OPEN BOXES (${save.boxes})`;
+  if (isBest) setTimeout(() => Sound.fanfare(), 600);
 }
 function offerSave() {
   const cost = 1 << world.saves;
@@ -1439,7 +1737,6 @@ function revive() {
   if (save.keys < cost) return;
   save.keys -= cost; world.saves++; persist();
   Sound.key();
-  // clear the area in front of the player
   for (let i = obstacles.length - 1; i >= 0; i--) {
     const o = obstacles[i];
     if (o.z0 < world.dist + 45 && o.z1 > world.dist - 3) { releaseObstacle(o); obstacles.splice(i, 1); }
@@ -1453,23 +1750,42 @@ function revive() {
   Sound.startMusic();
   input.queue.length = 0;
 }
+function cycleChar(dir) {
+  const i = CHARACTERS.findIndex(c => c.id === save.char);
+  save.char = CHARACTERS[(i + dir + CHARACTERS.length) % CHARACTERS.length].id;
+  persist(); setHero(save.char); refreshMenu();
+}
 
 $('playBtn').addEventListener('click', startGame);
-$('shopBtn').addEventListener('click', () => { Sound.init(); state = 'shop'; renderShop(); showScreen('shop'); });
+$('prevChar').addEventListener('click', () => cycleChar(-1));
+$('nextChar').addEventListener('click', () => cycleChar(1));
+const openShop = tab => { shopTab = tab; state = 'shop'; renderShop(); showScreen('shop'); };
+$('navChars').addEventListener('click', () => openShop('chars'));
+$('navUpgrades').addEventListener('click', () => openShop('power'));
+$('navBoxes').addEventListener('click', enterBoxes);
 $('shopClose').addEventListener('click', () => { state = 'menu'; refreshMenu(); showScreen('menu'); });
+$('settingsBtn').addEventListener('click', () => { state = 'settings'; refreshSwitches(); showScreen('settings'); });
+$('settingsClose').addEventListener('click', () => { state = 'menu'; refreshMenu(); showScreen('menu'); });
+document.querySelectorAll('.sw[data-set]').forEach(sw => sw.addEventListener('click', () => {
+  const k = sw.dataset.set; save[k] = !save[k]; persist();
+  if (k === 'sound') { Sound.init(); Sound.setOn(save.sound); }
+  refreshSwitches();
+}));
+document.querySelectorAll('[data-gfx]').forEach(b => b.addEventListener('click', () => { save.gfx = b.dataset.gfx; persist(); applyGfx(); refreshSwitches(); }));
 $('pauseBtn').addEventListener('click', pauseGame);
 $('resumeBtn').addEventListener('click', resumeGame);
 $('quitBtn').addEventListener('click', finishRun);
-$('invSw').addEventListener('click', () => { save.invincible = !save.invincible; persist(); $('invSw').classList.toggle('on', save.invincible); });
-$('sndSw').addEventListener('click', () => { save.sound = !save.sound; persist(); Sound.init(); Sound.setOn(save.sound); $('sndSw').classList.toggle('on', save.sound); });
 $('saveBtn').addEventListener('click', revive);
 $('skipBtn').addEventListener('click', finishRun);
 $('againBtn').addEventListener('click', startGame);
 $('menuBtn').addEventListener('click', goMenu);
+$('openBoxesBtn').addEventListener('click', enterBoxes);
+$('headstartBtn').addEventListener('click', useHeadstart);
 document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(); });
 
 // ---------------------------------------------------------------- main loop
 let last = performance.now();
+let perfT = 0, perfN = 0, perfChecked = false;
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -1478,42 +1794,67 @@ function frame(now) {
   if (state === 'play') {
     gameUpdate(dt);
     updateHud();
+    if (hsTimer > 0) {
+      hsTimer -= dt; $('hsTimer').style.width = Math.max(0, hsTimer / 4 * 100) + '%';
+      if (hsTimer <= 0) $('headstartBtn').classList.remove('show');
+    }
+    // drop to Low graphics automatically if the device can't hold a smooth frame rate
+    if (!perfChecked && save.gfx !== 'low') {
+      perfT += dt; perfN++;
+      if (perfT > 5) { perfChecked = true; if (perfT / perfN > 1 / 38) { save.gfx = 'low'; persist(); applyGfx(); } }
+    }
   } else if (state === 'dying') {
     player.deathT += dt;
     world.time += dt;
-    if (player.deathT > 1.0) offerSave();
+    if (player.deathT > 1.1) offerSave();
   } else if (state === 'saveme') {
     saveTimer -= dt;
-    $('ringArc').setAttribute('stroke-dashoffset', (289 * (1 - Math.max(0, saveTimer) / SAVE_TIME)).toFixed(1));
+    $('ringArc').setAttribute('stroke-dashoffset', (283 * (1 - Math.max(0, saveTimer) / SAVE_TIME)).toFixed(1));
     if (saveTimer <= 0) finishRun();
-  } else if (state === 'menu' || state === 'shop') {
+  } else if (state !== 'paused' && state !== 'countdown') {
     world.time += dt;
   }
 
-  tickCharacters(performance.now() / 1000);
+  tickCharacters(now / 1000);
   if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) ui.toast.classList.remove('show'); }
+  for (const c of clouds) { c.position.x += dt * 2.2; if (c.position.x > 230) c.position.x = -230; }
 
-  const mode = state === 'menu' || state === 'shop' ? state : (state === 'dying' ? 'dying' : 'play');
-  const heroMode = mode === 'menu' || mode === 'shop' ? 'menu' : 'play';
-  // face the camera on menu, face forward in game
+  const menuish = ['menu', 'shop', 'settings', 'loading', 'box', 'starting'].includes(state);
+  const mode = state === 'shop' ? 'shop' : state === 'box' ? 'box' : menuish ? 'menu' : state === 'dying' ? 'dying' : 'play';
+  const heroMode = menuish ? 'menu' : 'play';
   if (hero) {
     const targetRot = heroMode === 'menu' ? Math.PI + 0.35 : 0;
     hero.root.rotation.y = damp(hero.root.rotation.y, targetRot, 6, dt);
     if (state !== 'paused' && state !== 'countdown' && state !== 'saveme' && state !== 'over') animateHero(dt, heroMode);
+    if (state === 'box') hero.root.visible = false;
   }
   syncWorld(dt);
   if (state !== 'paused' && state !== 'countdown') { updateParticles(dt, world.dist); updateDrone(dt); }
+  updateBoxFx(dt);
   updateCamera(dt, mode);
-  renderer.render(scene, camera);
+  renderFrame();
 }
 
-// expose small debug hook for automated testing
-window.__surf = { get hero() { return hero; }, renderer, world, player, save, obstacles, get state() { return state; }, act, startGame, give: k => collectPickup({ kind: k }), sim: n => { for (let i = 0; i < n; i++) gameUpdate(1 / 60); } };
+// expose a small debug hook for automated testing
+window.__surf = { get hero() { return hero; }, renderer, world, player, save, obstacles, get state() { return state; }, act, startGame,
+  give: k => collectPickup({ kind: k }), sim: n => { for (let i = 0; i < n; i++) gameUpdate(1 / 60); }, enterBoxes, openBox };
 
-goMenu();
-{
-  const pb = $('playBtn'); pb.textContent = 'LOADING…'; pb.disabled = true;
-  heroReady.then(() => { pb.textContent = 'TAP TO PLAY'; pb.disabled = false; });
-}
-camera.position.set(0, 2.2, 5.6); camLook.set(0, 1.85, 0);
+// ---------------------------------------------------------------- boot
+applyGfx();
+clearWorld();
+spawnScenery(120);
+camera.position.set(0, 1.55, 4.9); camLook.set(0, 1.12, 0);
 requestAnimationFrame(frame);
+{
+  let p = 8;
+  const fill = $('loadFill');
+  const iv = setInterval(() => { p = Math.min(90, p + (90 - p) * 0.08); fill.style.width = p + '%'; }, 60);
+  Promise.all([heroReady, document.fonts ? document.fonts.ready.catch(() => {}) : null]).then(() => {
+    clearInterval(iv); fill.style.width = '100%';
+    setTimeout(() => {
+      $('loading').classList.add('hide');
+      goMenu();
+      setTimeout(() => { $('loading').classList.remove('show', 'hide'); makePortraits(); }, 450);
+    }, 250);
+  });
+}
