@@ -1,6 +1,9 @@
 // Network-first service worker: always fetch fresh when online, fall back to cache offline.
-const CACHE = 'surfhaven-v1';
-const FILES = ['./', './index.html', './game.js', './lib/three.module.min.js', './manifest.webmanifest',
+const CACHE = 'surfhaven-v2';
+const FILES = ['./', './index.html', './game.js', './manifest.webmanifest',
+  './lib/three.module.min.js', './lib/GLTFLoader.js', './lib/BufferGeometryUtils.js', './lib/RoundedBoxGeometry.js',
+  './lib/RoomEnvironment.js', './lib/SkeletonUtils.js',
+  './models/casual_male.glb', './models/casual_female.glb', './models/suit_male.glb', './models/suit_female.glb',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

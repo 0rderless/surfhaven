@@ -18,3 +18,7 @@ An endless rail-runner for your phone. Open it in Safari, tap **Share → Add to
 - Shop where everything is free: 7 characters (Haven, School Boy, Tattoo Girl, Black Boy, Void, Blaze, Volt), power-up upgrades, free keys
 - Progress (best score, coins, keys, upgrades, character) is saved on the device
 - Works offline after the first load (service worker)
+
+## Credits
+- Character models and animations: [Quaternius](https://quaternius.com) "Ultimate Animated Character Pack", CC0 (public domain). See `models/LICENSE-Quaternius-CC0.txt`.
+- 3D engine: [three.js](https://threejs.org) (MIT).
